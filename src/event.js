@@ -341,18 +341,36 @@ jQuery.event = {
 
 		return event.result;
 	},
-
+	
 	dispatch: function( event ) {
 
 		// Make a writable jQuery.Event from the native event object
-		event = jQuery.event.fix( event );
+		event = jQuery.event.fix( event || window.event );
 
-		var i, j, cur, ret, selMatch, matched, matches, handleObj, sel,
+		// On the "first pass", we need to evaluate any delegated events targeting elements between *this* element and event.target.
+		// On subsequent passes, we may assume that this has already been done and only evaluate delegated events on *this* element.
+		event._firstPass = event._firstPass === undefined ? true : false
+
+		var i, j, cur, ret, selMatch, matched, matches, handleObj, sel, related,
+			self = this,
 			handlers = ( (jQuery._data( this, "events" ) || {} )[ event.type ] || []),
-			delegateCount = handlers.delegateCount,
+			totalDelegateCount = 0,
 			args = core_slice.call( arguments ),
+			run_all = !event.exclusive && !event.namespace,
 			special = jQuery.event.special[ event.type ] || {},
-			handlerQueue = [];
+			handlerQueue = [],
+			delegatedHandler, delegatedHandlerElem, delegatedHandlers = [],
+			descendsFromThis = function(){
+				return $(this).closest(self).length
+			};
+
+		for (cur = this; cur; cur = cur.parentNode) {
+			delegatedHandler = ( jQuery._data( cur, "events" ) || {} )[ event.type ] || [];
+			if (delegatedHandler.delegateCount) {
+				delegatedHandlers.push( { handler: delegatedHandler, elem: cur } )
+				totalDelegateCount += delegatedHandler.delegateCount;
+			}
+		}
 
 		// Use the fix-ed jQuery.Event rather than the (read-only) native event
 		args[0] = event;
@@ -365,27 +383,33 @@ jQuery.event = {
 
 		// Determine handlers that should run if there are delegated events
 		// Avoid non-left-click bubbling in Firefox (#3861)
-		if ( delegateCount && !(event.button && event.type === "click") ) {
+		if ( totalDelegateCount && !(event.button && event.type === "click") ) {
 
-			for ( cur = event.target; cur != this; cur = cur.parentNode || this ) {
+			for ( cur = ( event._firstPass ? event.target : this ); cur && cur != this.parentNode; cur = cur.parentNode ) {
 
 				// Don't process clicks (ONLY) on disabled elements (#6911, #8165, #11382, #11764)
 				if ( cur.disabled !== true || event.type !== "click" ) {
-					selMatch = {};
 					matches = [];
-					for ( i = 0; i < delegateCount; i++ ) {
-						handleObj = handlers[ i ];
-						sel = handleObj.selector;
 
-						if ( selMatch[ sel ] === undefined ) {
-							selMatch[ sel ] = handleObj.needsContext ?
-								jQuery( sel, this ).index( cur ) >= 0 :
-								jQuery.find( sel, this, null, [ cur ] ).length;
-						}
-						if ( selMatch[ sel ] ) {
-							matches.push( handleObj );
+					for ( i = 0; i < delegatedHandlers.length; i++ ) {
+						delegatedHandler = delegatedHandlers[i].handler;
+						delegatedHandlerElem = delegatedHandlers[i].elem
+						selMatch = {};
+						for ( j = 0; j < delegatedHandler.delegateCount; j++ ) {
+							handleObj = delegatedHandler[ j ];
+							sel = handleObj.selector;
+
+							if ( selMatch[ sel ] === undefined ) {
+								selMatch[ sel ] = handleObj.needsContext ?
+									jQuery( sel, delegatedHandlerElem ).filter( descendsFromThis ).index( cur ) >= 0 :
+									$( jQuery.find( sel, delegatedHandlerElem, null, [ cur ] ) ).filter( descendsFromThis ).length; // NEED TO MAKE SURE THIS DESCENDS FROM *THIS*
+							}
+							if ( selMatch[ sel ] ) {
+								matches.push( handleObj );
+							}
 						}
 					}
+
 					if ( matches.length ) {
 						handlerQueue.push({ elem: cur, matches: matches });
 					}
@@ -394,8 +418,13 @@ jQuery.event = {
 		}
 
 		// Add the remaining (directly-bound) handlers
-		if ( handlers.length > delegateCount ) {
-			handlerQueue.push({ elem: this, matches: handlers.slice( delegateCount ) });
+		if ( handlers.length > handlers.delegateCount ) {
+			if ( handlerQueue.length > 0 && $(handlerQueue[handlerQueue.length - 1].elem).is(this) ) {
+				var matches = handlerQueue[handlerQueue.length - 1].matches
+				matches.push.apply( matches, handlers.slice( handlers.delegateCount ) );
+			} else {
+				handlerQueue.push({ elem: this, matches: handlers.slice( handlers.delegateCount ) });
+			}
 		}
 
 		// Run delegates first; they may want to stop propagation beneath us
@@ -406,9 +435,9 @@ jQuery.event = {
 			for ( j = 0; j < matched.matches.length && !event.isImmediatePropagationStopped(); j++ ) {
 				handleObj = matched.matches[ j ];
 
-				// Triggered event must either 1) have no namespace, or
+				// Triggered event must either 1) be non-exclusive and have no namespace, or
 				// 2) have namespace(s) a subset or equal to those in the bound event (both can have no namespace).
-				if ( !event.namespace || event.namespace_re && event.namespace_re.test( handleObj.namespace ) ) {
+				if ( run_all || (!event.namespace && !handleObj.namespace) || event.namespace_re && event.namespace_re.test( handleObj.namespace ) ) {
 
 					event.data = handleObj.data;
 					event.handleObj = handleObj;
